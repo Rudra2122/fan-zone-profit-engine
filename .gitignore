@@ -1,2 +1,17 @@
 # guildly agent workspace (linked project) — unstaged by default
 .guildly/
+
+# secrets / env
+.env
+*.env
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# os
+.DS_Store
