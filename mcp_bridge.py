@@ -36,6 +36,20 @@ _BOUNDARY = re.compile(
 )
 
 
+class MCPUnavailableError(RuntimeError):
+    """The MCP data layer is unavailable — server failed to start, or a tool
+    call returned an error (e.g. MongoDB unreachable). Distinct from a genuine
+    empty query result, so callers can return an honest 5xx instead of a 404."""
+
+
+def _raise_on_error(result, op):
+    """Raise if the MCP tool reported an error, so an infra failure isn't
+    silently read as an empty result (which would masquerade as 'no match')."""
+    if getattr(result, "isError", False):
+        text = "\n".join((getattr(c, "text", "") or "") for c in result.content)
+        raise MCPUnavailableError(f"MongoDB MCP '{op}' failed: {text[:400]}")
+
+
 def _parse_docs(result):
     """Extract the document array from an MCP `find` tool result.
 
@@ -82,7 +96,7 @@ class _MCPBridge:
             thread.start()
             self._ready.wait(timeout=90)
             if self._session is None:
-                raise RuntimeError(
+                raise MCPUnavailableError(
                     f"MongoDB MCP bridge failed to start: {self._start_error}"
                 )
 
@@ -109,11 +123,14 @@ class _MCPBridge:
         )
         self._stack = AsyncExitStack()
         read, write = await self._stack.enter_async_context(stdio_client(params))
-        self._session = await self._stack.enter_async_context(
-            ClientSession(read, write)
-        )
-        await self._session.initialize()
+        session = await self._stack.enter_async_context(ClientSession(read, write))
+        # Bound the handshake so a dead/broken server fails fast instead of
+        # hanging startup. Publish self._session only after a successful
+        # handshake — otherwise a failed init would look "started" to _ensure
+        # and later calls would hang into a 500 instead of a clean 503.
+        await asyncio.wait_for(session.initialize(), timeout=30)
         self._lock = asyncio.Lock()
+        self._session = session
         self._ready.set()
 
     def _call(self, coro):
@@ -132,14 +149,16 @@ class _MCPBridge:
             args["projection"] = projection
         async with self._lock:
             result = await self._session.call_tool("find", args)
+        _raise_on_error(result, "find")
         return _parse_docs(result)
 
     async def _ainsert(self, collection, documents):
         async with self._lock:
-            await self._session.call_tool(
+            result = await self._session.call_tool(
                 "insert-many",
                 {"database": DB_NAME, "collection": collection, "documents": documents},
             )
+        _raise_on_error(result, "insert-many")
 
     # -- sync public API ---------------------------------------------------
     def find(self, collection, filter=None, sort=None, limit=None, projection=None):
