@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 
 from agent import MatchNotFoundError, run_agent
+from mcp_bridge import MCPUnavailableError
 
 load_dotenv()
 
@@ -51,7 +52,15 @@ def agent():
     try:
         return jsonify(run_agent(city))
     except MatchNotFoundError:
+        # Genuine empty result — the city has no fixture.
         return jsonify({"error": f"No upcoming match found for city '{city}'."}), 400
+    except MCPUnavailableError as exc:
+        # Infra failure (MongoDB MCP server down / DB unreachable) — not a 404.
+        app.logger.exception("agent data layer unavailable")
+        return (
+            jsonify({"error": "Data service unavailable.", "detail": str(exc)}),
+            503,
+        )
     except Exception as exc:  # noqa: BLE001 — surface a clean 500 to the client
         app.logger.exception("agent run failed")
         return jsonify({"error": "Internal error running agent.", "detail": str(exc)}), 500
