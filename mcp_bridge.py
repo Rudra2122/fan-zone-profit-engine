@@ -116,9 +116,13 @@ class _MCPBridge:
         if not uri:
             raise RuntimeError("MONGODB_URI is not set")
         cmd = os.environ.get("MONGODB_MCP_CMD", "mongodb-mcp-server")
+        # Pass the connection string as an explicit CLI arg (not only via
+        # MDB_MCP_CONNECTION_STRING): on Cloud Run the env-var path did not
+        # reach the server ("configured connection string is not valid"),
+        # whereas the CLI arg is unambiguous. Keep the env var too as a fallback.
         params = StdioServerParameters(
             command=cmd,
-            args=[],
+            args=["--connectionString", uri],
             env={**os.environ, "MDB_MCP_CONNECTION_STRING": uri},
         )
         self._stack = AsyncExitStack()
